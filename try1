@@ -1,0 +1,31 @@
+from ._assets import (
+	Asset,
+	Equity,
+	Future,
+	make_asset_array,
+	CACHE_FILE_TEMPLATE)
+
+from .asset import (
+	AssetFinder,
+	AssetConvertible
+)
+
+_all_ = [
+	'Asset',
+	'Equity',
+
+]
+
+
+________
+
+int multiply(int *a, int fwdProduct, int indx){
+	
+	int revProduct = 1;
+	if (indx < N) {
+
+		revProduct = multiply()
+	}
+
+
+}
