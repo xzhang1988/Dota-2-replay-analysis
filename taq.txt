@@ -1,0 +1,603 @@
+# 
+'''
+   TAQ Database Management, version 4.1.
+   Copyright(c) TAQ team, Quantitative Finance Center@Stony Brook
+'''
+
+
+import os, sys, glob
+from datetime import datetime
+import numpy as np
+import scipy as sp
+import pandas as pd
+import struct
+import binascii
+import pdb
+
+#import nysetaq as taq  # import taq_extract, taq_clean, taq_manage
+
+# SETTINGS
+_DBFOLDER   = r"//qftaq/SBQF_DATABASE"                 # database directory
+_TAQFOLDER  = r"/qftaq/SBQF_DATABASE/NYSE_TAQ"        # trade and quote binary/index files
+_MASTFOLDER = _DBFOLDER + '/NYSE_TAQ_master'               # master table files
+_USAGEFILE  = _DBFOLDER + r"/Accessories/Python_Module/TAQ_Usage.txt"
+_DATE2FILE  = r"/qftaq/Accessories/DATE2.DAT"         # trading dates, total disk number
+_DIVFOLDER  = _DBFOLDER + r"/dividend_n_split_yahoo/"      # dividend from Yahoo Finance
+_DAIFOLDER  = _DBFOLDER + r"/daily_price_dividend_split/"  # daily close price from Yahoo Finance
+_PUBFOLDER  = '/qftaq/Accessories/past/public'             # lastest python module release folder 
+
+
+# DATA FORMAT AFTER 2005/01/01
+_DATE2FMT3 = {'TDATE':('S8',0), 'CQIDXB':('S8',8), 'CQIDXE':('S8',16),\
+             'CTIDXB':('S8',24), 'CTIDXE':('S8',32), 'DISK':('S2',41),\
+             'DATAFMT':('S1',44)}
+_MASTFMT3 = {'SYMBOL':('S10',0), 'NAME':('S30',10), 'CUSIP':('S12',40),\
+             'ETx':('S10',52), 'ITS':('S1',62), 'ICODE':{'S4',63},\
+             'SHARESOUT':('S10',67), 'UOT':('S4',77), 'DENOM':('S1',81),\
+             'TYPE':('S1',82), 'DATEF':('S8',83)}
+_TIDXFMT3 = {'SYMBOL':('S10',0), 'TDATE':('<i4',10), 'BEGREC':('<i4',14),\
+             'ENDREC':('<i4',18)}
+_TBINFMT3 = {'TTIM':('<i4',0), 'PRICE':('<i4',4), 'SIZ':('<i4',8),\
+             'G127':('<i2',12), 'CORR':('<i2',14), 'COND':('<i2',16),\
+             'EX':('S1',18)}
+_QIDXFMT3 = {'SYMBOL':('S10',0), 'QDATE':('<i4',10), 'BEGREC':('<i4',14),\
+             'ENDREC':('<i4',18)}
+_QBINFMT3 = {'QTIM':('<i4',0), 'BID':('<i4',4), 'OFR':('<i4',8),\
+             'BIDSIZ':('<i4',12), 'OFRSIZ':('<i4',16), 'MODE':('<i2',20),\
+             'EX':('S1',22),'MMID':('S4',23)}
+# leo. taqformat. 1993 - 2013. for trade data. 
+def taqformat(date_str):
+    if date_str>='20050101':
+        DATE2FMT = {'TDATE':('S8',0), 'CQIDXB':('S8',8), 'CQIDXE':('S8',16),\
+             'CTIDXB':('S8',24), 'CTIDXE':('S8',32), 'DISK':('S2',41),\
+             'DATAFMT':('S1',44)}
+        #MASTFMT = {'SYMBOL':('S10',0), 'NAME':('S30',10), 'CUSIP':('S12',40),\
+        #     'ETx':('S10',52), 'ITS':('S1',62), 'ICODE':{'S4',63},\
+        #     'SHARESOUT':('S10',67), 'UOT':('S4',77), 'DENOM':('S1',81),\
+        #     'TYPE':('S1',82), 'DATEF':('S8',83)}
+        TIDXFMT = {'SYMBOL':('S10',0), 'TDATE':('<i4',10), 'BEGREC':('<i4',14),\
+             'ENDREC':('<i4',18)}
+        TBINFMT = {'TTIM':('<i4',0), 'PRICE':('<i4',4), 'SIZ':('<i4',8),\
+             'G127':('<i2',12), 'CORR':('<i2',14), 'COND':('<i2',16),\
+             'EX':('S1',18)}
+    if date_str < '20050101' and date_str >= '20000101':
+        DATE2FMT = {'TDATE':('S8',0), 'CQIDXB':('S8',8), 'CQIDXE':('S8',16),\
+             'CTIDXB':('S8',24), 'CTIDXE':('S8',32), 'DISK':('S2',41),\
+             'DATAFMT':('S1',44)}
+        TIDXFMT = {'SYMBOL':('S10',0), 'TDATE':('<i4',10), 'BEGREC':('<i4',14),\
+             'ENDREC':('<i4',18)}
+        TBINFMT = {'TTIM':('<i4',0), 'PRICE':('<i8',4), 'SIZ':('<i4',12),\
+             'TSEQ':('<i4',16), 'G127':('<i2',20), 'CORR':('<i2',22),\
+             'COND':('<i4',24), 'EX':('S1',28)}
+    if date_str < '20000101':
+        DATE2FMT = {'TDATE':('S6',0), 'CQIDXB':('S8',6), 'CQIDXE':('S8',14),\
+             'CTIDXB':('S8',22), 'CTIDXE':('S8',30)}
+        TIDXFMT = {'SYMBOL':('S10',0), 'TDATE':('<i4',10), 'BEGREC':('<i4',14),\
+             'ENDREC':('<i4',18)}
+        TBINFMT = {'TTIM':('<i4',0), 'PRICE':('<i4',4), 'SIZ':('<i4',8),\
+             'TSEQ':('<i4',12), 'G127':('<i2',16), 'CORR':('<i2',18),\
+             'COND':('<S1',2), 'EX':('S1',21)}
+    return DATE2FMT, TIDXFMT, TBINFMT
+
+
+# get the list of tickers is going to extract
+def _get_tickers_file(file_name):
+    ticker_list = [];
+    with open(file_name) as ifile:
+        for line in ifile:
+            strs = line.strip().split(',')
+            for item in strs:
+                ticker_list.append(item.strip())
+    return ticker_list
+
+
+def parse_job(argv):
+    _tickers_sample_path = ''
+    error_msg = ''
+
+    job = {'INCLUDE_TRADES':1, 'INCLUDE_QUOTES':0,\
+           'START_DATE':"", 'END_DATE':"", 'FREQ':0,\
+           'ITEM':[], 'EXCHANGE':"*",\
+           'TRADES_FILE':"trades.bin", 'OUTFOLDER':"",\
+           'QUOTES_FILE':""}
+
+    if argv[0] == '-d':
+        job['START_DATE'] = argv[1]
+        job['END_DATE'] = argv[2]
+        job['FREQ'] = int(argv[3])
+        if argv[4] == '-s':     # get tickers from command line
+            k = 5
+            while argv[k][0] != '-':    # continously get tickers from command line
+                job['ITEM'].append(argv[k])
+                k += 1
+        if argv[4] == '-sp':
+            file_name = argv[5] + '.txt'
+            if not(os.path.isfile(file_name)):
+                error_msg = "No prefixed tickers sample %s." % argv[5]
+                return job, error_msg
+            job['ITEM'] = _get_tickers_file(file_name)
+            k = 6
+        if argv[4] == '-sf':        # getting tickers from file
+            if not(os.path.isfile(argv[5])):
+                error_msg = "No tickers file found."
+                return job, error_msg
+            job['ITEM'] = _get_tickers_file(argv[5])
+            k = 6
+        if argv[k] == '-x':     # specify the exchange market
+            job['EXCHANGE'] = argv[k + 1]
+            k += 2
+        if argv[k] == '-o':     # output file name
+            job['TRADES_FILE'] = argv[k+1]
+            if argv[k+2][-1] != "/":
+                job['OUTFOLDER'] = argv[k+2] + "/"
+            else:
+                job['OUTFOLDER'] = argv[k+2]
+
+    if argv[0] == '-f':
+        job = _get_job_file(argv[1])
+
+    if argv[0] == '-w':
+        job = _get_job_wizard()     # in taq_extract.py
+
+    if not(job['ITEM']):
+        error_msg = "No input tickers."
+
+    return job, error_msg
+
+
+# clean each trade, check the correlation of the price at certain time, filter the extreme price
+def _clean_trades(trades_buff, trim_size = 40, granularity = 0.02):
+    buff = list()       # create empty list
+    trim_buff = list()
+    cleaned = list()
+    first_buff_full = False
+    mid_pos = int(trim_size / 2)
+#    total_rec = len(trades_buff)   # total size of the buff data
+#    per_size = total_rec/100
+
+#    passed = 0
+    counter = 0
+    for trade in trades_buff:
+#        passed += 1            # tracking how many work been done
+#        if passed%per_size == 0:
+#            sys.stdout.write("\b"*20 + "[{0:d}%] Cleaning".\
+#                             format(passed/per_size).rjust(20))
+        kept = True
+        CORR = trade['CORR']        # Correction Indicator
+        COND = trade['COND']        # Sale Condition
+        if (CORR != 0) or (str(COND) == "Z"):   # Sold Sale (Z)
+            kept = False
+            counter += 1
+        if kept:                # if the price is good for keeping
+            buff.append(trade['PRICE']/10000.0) # buff is keeping the price of the trades
+            trim_buff.append(trade)     # trim_buff is keeping rows from trade
+            if len(buff) > trim_size:       # too much buff with bad correlation, remove it
+                buff.pop(0)         # remove and return the first item
+                trim_buff.pop(0)
+            if (len(buff) == trim_size):    # buff is full
+                buff_mean = np.mean(buff)   # mean of the buff
+                buff_std = np.std(buff)     # standard deviation sigma
+                if first_buff_full:     # checking if it passed the first time of buff full
+                    if (np.abs(buff[mid_pos] - buff_mean) < \
+                       3 * buff_std + granularity):     # check if it is good correlation
+                        cleaned.append(trim_buff[mid_pos])  # good then add to cleaned list
+                    else:
+                        counter += 1
+                else:
+                    first_buff_full = True
+                    for i in range(0, mid_pos + 1):
+                        if (np.abs(buff[i] - buff_mean) < \
+                            3 * buff_std + granularity):
+                            cleaned.append(trim_buff[i])
+                        else:
+                            counter += 1
+    if len(buff) >= trim_size:
+        buff_mean = np.mean(buff)
+        buff_std = np.std(buff)
+        for i in range(mid_pos + 1, trim_size): # saving the last portion of data in buff
+            if (np.abs(buff[i] - buff_mean) < \
+                3 * buff_std + granularity):
+                cleaned.append(trim_buff[i])
+            else:
+                counter += 1
+    if buff and len(buff) < trim_size:
+        for entry in trim_buff:
+            cleaned.append(entry)
+    sys.stdout.write("\b"*20 + "[100%] Cleaning".rjust(20))
+
+#    print "{0:d} records have been removed.".format(counter)
+    return cleaned
+
+
+# collect all the price quote at the same second, set the median price as the price
+def _aggregate_trades(trades_buff):
+    import copy
+    # Initializing percentage bar
+#    total_rec = len(trades_buff)
+#    per_size = total_rec/100
+#    passed = 0
+    # Initializing the variables
+    current = ""
+    buff = []
+    aggregated = []
+    volume = 0
+    for trade in trades_buff:
+#        passed += 1
+#        if passed%per_size == 0:
+#            sys.stdout.write("\b"*20 + "[{0:d}%] Aggregating".\
+#                             format(passed/per_size).rjust(20))
+        if not(current):
+            current = trade['TTIM']
+        if (trade['TTIM'] != current):      # collect all the trade at the same time
+            tmp_trade = copy.copy(trade)
+            tmp_trade['TTIM'] = current
+            tmp_trade['PRICE'] = np.median(buff)# get the median of the prices at this point
+            tmp_trade['SIZ'] = volume
+            aggregated.append(tmp_trade)    # save the trade
+            current = trade['TTIM']
+            buff = [trade['PRICE']]
+            volume = trade['SIZ']
+        else:
+            buff.append(trade['PRICE'])
+            volume += trade['SIZ']
+    if (trade['TTIM'] == current):
+        tmp_trade = copy.copy(trade)
+        tmp_trade['TTIM'] = current
+        tmp_trade['PRICE'] = np.median(buff)
+        tmp_trade['SIZ'] = volume
+        aggregated.append(tmp_trade)
+#    sys.stdout.write("\b"*20 + "[100%] Aggregating".rjust(20))
+    return aggregated
+
+
+# Time second calculator
+def _time_sec(h, m, s = 0):
+    return (h * 60 + m) * 60 + s
+
+
+# Regulate trades, add to related time interval
+def _regulate_trades(trades_buff, interval = 60):
+    import copy
+    # Initializing the time interval
+    _OPENTIME = _time_sec(9,30,0)
+    _CLOSETIME = _time_sec(16,01,0)
+    tar_times = range(_OPENTIME, _CLOSETIME, interval)
+    tar_times.insert(0,0)
+    # Initializing percentage bar
+#    total_rec = len(trades_buff)
+#    per_size = total_rec/100
+#    passed = 0
+    # Initializing the variables
+    volume = []
+    price = []
+    for i in range(0, len(tar_times)-1):
+        volume.append(0)
+        price.append(0.0)
+    regulated = list();
+    current = 10000
+    close_volume = 0
+    tmpvol = 0
+    # Regulating each trade
+    for trade in trades_buff:
+        # Output the percentages done
+#        passed += 1
+#        if passed%per_size == 0:
+#            sys.stdout.write("\b"*20 + "[{0:d}%] Regulating".\
+#                             format(passed/per_size).rjust(20))
+        # Categorize trades into different time interval
+        current = int(trade['TTIM'])
+        for i in range(0, len(tar_times)-1):
+            if current > tar_times[i] and current <= tar_times[i+1] \
+                    and current != tar_times[-1]:
+                volume[i] = volume[i] + trade['SIZ']
+                price[i] = trade['PRICE']
+                break
+            # Getting the closing price of the day
+            if current >= tar_times[-1] and current <= 58000:
+                compare_volume = trade['SIZ']
+                if close_volume == 0:
+                    price[-1] = trade['PRICE']
+                    close_volume = compare_volume
+                    volume[-1] += trade['SIZ']
+                elif close_volume < compare_volume:
+                    price[-1] = trade['PRICE']
+                    close_volume = trade['SIZ']
+                    volume[-1] += trade['SIZ'] + tmpvol
+                    tmpvol = 0
+                else:
+                    tmpvol += trade['SIZ']
+    # Append the regulated trades
+    for i in range(0, len(tar_times)-1):
+        if volume[i] != 0:
+            tmp = copy.copy(trade)
+            tmp['TTIM'] = tar_times[i+1]
+            tmp['PRICE'] = price[i]
+            tmp['SIZ'] = volume[i]
+            regulated.append(tmp)
+
+#    sys.stdout.write("\b"*20 + "[100%] Regulating".rjust(20))
+    return regulated
+
+
+def _outfile(job, ticker, trades_buff, datestr, interval = 60):
+    if datestr >= '20050101':
+        price_scale = 10000.0      # 1e+4 
+    if datestr < '20050101' and datestr >= '20000101':
+        price_scale = 100000000.0  # 1e+8
+    if datestr < '20000101':
+        price_scale = 100000.0     # 1e+5
+    out_file_type = job['TRADES_FILE'].split('.')[1].lower()    # get the type of the output
+    out_file_prefix = job['TRADES_FILE'].split('.')[0]
+    out_file_folder = job['OUTFOLDER'] + out_file_prefix + "_F" + str(interval) + "/"
+    if not os.path.exists(out_file_folder):
+        os.makedirs(out_file_folder)
+    if out_file_type == 'txt' and trades_buff:
+        outfile = os.path.join(out_file_folder, ticker + "." + out_file_type)
+        if not os.path.exists(outfile):
+            with open(outfile, 'w') as of:
+                if len(job['EXCHANGE']) == 1:           # only one exchange market
+                    of.write("TICKER,TDATE,TTIM,PRICE,SIZ\n")
+                else:                       # more than one ex
+                    of.write("TICKER,TDATE,TTIM,PRICE,SIZ,EX\n")
+        with open(outfile, 'a') as of:
+            for trade in trades_buff:
+                if len(job['EXCHANGE']) == 1:
+                    outstr = "%s,%d,%d,%.4f,%d\n" % (\
+                            ticker, int(datestr), trade['TTIM'],\
+                            trade['PRICE']/price_scale, trade['SIZ'])
+                else:
+                    outstr = "%s,%d,%d,%.4f,%d,%s\n" % (\
+                            ticker, int(datestr), trade['TTIM'],\
+                            trade['PRICE']/price_scale, trade['SIZ'], trade['EX'])
+                of.write(outstr)
+
+#    if out_file_type == 'h5':
+#        store = pd.HDFStore(job['TRADES_FILE'])
+
+#    if out_file_type == 'bin':
+#        with open(job['TRADES_FILE'], 'ab') as outfile:
+#            for trade in trades_buff:
+#                if len(job['EXCHANGE']) == 1:
+#                    values = (ticker, idx_entry[0]['TDATE'], trade['TTIM'],\
+#                              trade['PRICE'], trade['SIZ'])
+#                    s = struct.Struct('10s i i i i')
+#                    packed_data = s.pack(*values)
+#                else:
+#                    values = (ticker, idx_entry[0]['TDATE'], trade['TTIM'],\
+#                              trade['PRICE'], trade['SIZ'], trade['EX'])
+#                    s = struct.Struct('10s i i i i 1s')
+#                    packed_data = s.pack(*values)
+#                outfile.write(packed_data)
+
+
+# extract trades
+def _extract_trades(job):
+    with open(_DATE2FILE) as date2_file:
+        datefound = False
+        for line in date2_file:
+            strs = line.split()
+            if (strs[0] >= job["START_DATE"]) & (strs[0] <= job["END_DATE"]):
+                datestr = strs[0]
+                DATE2FMT, TIDXFMT, TBINFMT = taqformat(datestr)
+                cdfolder = os.path.join(_TAQFOLDER + "/" + datestr[0:6])
+                print "Processing " + datestr + '...'
+                if datestr >= '20000101': 
+                    #try: 
+                    tidxfiles = glob.glob(os.path.join(cdfolder, "T*" +\
+                                strs[5] + ".IDX"))
+                    # except: 
+                    #    tidxfiles = glob.glob(os.path.join(cdfolder, "T*" +\
+                    #            ))
+                elif datestr < '20000101':
+                    if strs[5] is '0':
+                        tidxfiles = glob.glob(os.path.join(cdfolder,"CT*.IDX"))
+                    else:
+                        tidxfiles = glob.glob(os.path.join(cdfolder,"CT*" +\
+                                    strs[5]+".IDX"))
+                if not(tidxfiles):
+                    print "[Error] No index file found."
+                    with open('taq_error_idx.txt', 'a') as erridx:
+                        erridx.write(strs[0])
+                tidx_entries = list()
+                symbol_available = list()
+                for tidxfile in tidxfiles:
+                    # modify
+                    tidx = np.memmap(tidxfile, dtype=np.dtype(TIDXFMT), mode='r')
+                    #tidx = np.memmap(tidxfile, dtype=np.dtype(_TIDXFMT3),\
+                    #                 mode='r')
+                    for entry in tidx:
+                        if job['ITEM'] == '*':      # if extracting all stocks
+                            tidx_entries.append([entry,tidxfile])
+                            symbol_available.append(entry['SYMBOL'])
+                        else:
+                            if entry['SYMBOL'].strip() in job['ITEM']:
+                                tidx_entries.append([entry,tidxfile])
+                                symbol_available.append(entry['SYMBOL'])
+                for idx_entry in tidx_entries:
+                    trades_buff = [];
+                    ticker = idx_entry[0]['SYMBOL'].strip()
+                    tbinfile = idx_entry[1][:-3] + "BIN";
+                    tbin = np.memmap(tbinfile, dtype=np.dtype(TBINFMT), mode='r')
+                    # tbin = np.memmap(tbinfile, dtype=np.dtype(_TBINFMT3), mode='r')
+                    begpos = idx_entry[0]['BEGREC']-1
+                    endpos = idx_entry[0]['ENDREC']-1
+                    persize = (endpos - begpos + 1) / 100
+                    sys.stdout.write("  " + ticker.ljust(5) + "[0%] Extracting".rjust(20))
+                    k = 0
+                    for trade in tbin[begpos:endpos]:
+                        if k%persize==0:
+                            sys.stdout.write("\b"*20 + \
+                                             "[{0:d}%] Extracting".format(k/persize)\
+                                             .rjust(20))
+                        k += 1
+                        if (trade['EX'] in job['EXCHANGE']) or (job['EXCHANGE'] == "*"):
+                            trades_buff.append(trade);
+                    sys.stdout.write("\b"*20 + "[100%] Extracting".rjust(20))
+
+                    if not(trades_buff):
+                        sys.stdout.write("\b"*20 + "[0 records in exchange " + job['EXCHANGE'] + "]\n")
+                    else:
+#                        print(str(len(trades_buff)) + " extracted")
+                        if (len(trades_buff) > 780):    # Average at least every half min a trade
+                            trades_buff = _clean_trades(trades_buff, 40, 0.02)
+                        if (len(trades_buff) != 0) and (job['FREQ'] != 0):
+#                            print(str(len(trades_buff)) + " before aggregate")
+                            trades_buff = _aggregate_trades(trades_buff)
+#                            print(str(len(trades_buff)) + " before regulate")
+                            trades_buff = _regulate_trades(trades_buff, job['FREQ'])
+                        sys.stdout.write("\b"*20 + datestr +  "  [Success]" + " "*20 + "\n")
+#                        sys.stdout.write(ticker + "\t" + datestr + "  Extracted and regulated\n")
+                        if len(trades_buff) > 0:
+                            _outfile(job, ticker, trades_buff, datestr, job['FREQ'])
+
+                datefound = True
+        if not datefound:
+            print "[Error] Target dates are not trading days."
+
+#    if out_file_type == 'h5':
+#        store.close()
+
+
+def _adjust_trades(job):
+    price_before = []
+    tfile_type = job['TRADES_FILE'].split('.')[1].lower()   # get the type of the output
+    tfile_prefix = job['TRADES_FILE'].split('.')[0]
+    print("Processing dividend and split adjustments...")
+    for ticker in job['ITEM']:
+        adjusted_count = 0
+        tmp = []
+        tfolder = job['OUTFOLDER'] + tfile_prefix + "_F" + str(job['FREQ']) + "/"
+        adjusted_folder = job['OUTFOLDER'] + tfile_prefix + "_F" + str(job['FREQ']) + "_A/"
+        if not os.path.exists(adjusted_folder):
+            os.makedirs(adjusted_folder)
+        ticker_file = os.path.join(tfolder, ticker + "." + tfile_type)
+        ticker_adjusted_file = os.path.join(adjusted_folder, ticker + "." + tfile_type)
+#        ticker_file = tfile_prefix + "_" + ticker + "." + tfile_type
+        divident_split_ratio = os.path.join(_DIVFOLDER, ticker + "_r.txt")
+        if os.path.exists(ticker_file):
+            with open(ticker_file, 'rb') as tfile:
+                next(tfile)
+                for tline in tfile:
+#                    print(tline)
+                    tstrs = tline.strip().split(',')
+                    tmp.append(tstrs)
+            try:
+                with open(divident_split_ratio, 'rb') as dsratio:
+                    next(dsratio)
+                    for dsline in dsratio:
+                        adjusted_trades = []
+                        strs = dsline.strip().split(',')
+#                        print(strs)
+                        if (int(strs[1]) > int(job["START_DATE"])):
+                            ratio = float(strs[4])
+                            for tmline in tmp:
+                                if int(tmline[1]) < int(strs[1]):
+                                    tmline[3] = str(round(float(tmline[3]) * ratio, 4))
+                                adjusted_trades.append(tmline)
+                            tmp = adjusted_trades
+#                            adjusted_count += 1
+#                            print(tmp)
+#                    if adjusted_count > 0:
+#                    else:
+#                        print("<" + ticker + ">\tNo adjustment")
+            except IOError:
+                print("<" + ticker + ">\tNo adjustment")
+            with open(ticker_adjusted_file, 'w') as tfile:
+                tfile.write("TICKER,TDATE,TTIM,PRICE,SIZ\n")
+                k = 0;
+                for tmline in tmp:
+                    outstr = (','.join(tmp[k]) + '\n')
+                    tfile.write(outstr)
+                    k = k + 1;
+                print("<" + ticker + ">\tCompleted!")
+
+
+def _find_last_closing_price(ticker, divident_or_split):
+    daily_price_file = os.path.join(_DAIFOLDER, ticker + ".txt")
+    at_price = []
+    with open(daily_price_file, 'rb') as dpfile:
+        if dpfile:
+            next(dpfile)
+            for dpfile_entry in dpfile:
+                dpfile_strs = dpfile_entry.strip().split(',')
+                if (dpfile_strs[0].strip()[0] == '1') or \
+                    (dpfile_strs[0].strip()[0] == '2'):
+                    if int(divident_or_split[1].strip()) > int(dpfile_strs[0]):
+                        at_price = dpfile_strs[4]
+                        break
+        else:
+            print(ticker + "\tMissing daily price!")
+            with open('missing_daily_price.txt', 'a') as mdp:
+                mdp.write(ticker)
+    return at_price
+
+
+def _get_dividend_split_ratio(job):
+    print("Getting dividend and split ratio...")
+    for ticker in job['ITEM']:
+        ratio = []
+        divident_split_file = os.path.join(_DIVFOLDER, ticker + ".txt")
+        divident_split_ratio = os.path.join(_DIVFOLDER, ticker + "_r.txt")
+
+        try:
+            with open(divident_split_file, 'rb') as dsfile:
+#            if dsfile:
+                with open(divident_split_ratio, 'w') as tfile:
+                    tfile.write("TYPE,DATE,SIZ,PRICE,RATIO\n")
+                adjusted_count = 0
+                for dsline in dsfile:
+                    # print ticker
+                    # print dsline
+                    at_price = []
+                    strs = dsline.strip().split(',')
+                    if (strs[0] == 'DIVIDEND') and (float(strs[2]) != 0.0):
+                        at_price = _find_last_closing_price(ticker, strs)
+                        if at_price:
+                            ratio = 1 - float(strs[2]) / float(at_price)
+                    if (strs[0] == 'SPLIT') and (strs[2] != '1:1') and\
+                        (strs[2] != '0:0'):
+                        at_price = _find_last_closing_price(ticker, strs)
+                        s = strs[2].strip().split(':')
+                        ratio = float(s[1]) / float(s[0])
+                    if at_price:
+                        adjusted_count += 1
+                        outstr = (strs[0] + "," + strs[1].strip() + "," + \
+                                strs[2] + "," + at_price + "," + \
+                                str(ratio) + '\n')
+                        # print(outstr)
+                        with open(divident_split_ratio, 'a') as dsratio:
+                            dsratio.write(outstr)
+                    if adjusted_count > 0:
+                        print(ticker + "\tGot price ajustment ratios")
+                    else:
+                        print(ticker + "\tNo dividend or split")
+#            else:
+#                print(ticker + "\tNo dividend or split")
+        except IOError:
+            print(ticker + "\tNo dividend or split")
+
+def alltickers(): 
+    yyyymm = '201312'
+    mast_table = open(_MASTFOLDER + '/M' + yyyymm + '.TAB').read().split('\n')
+    outfile = _PUBFOLDER + '/tickers_' + yyyymm + '.txt' 
+    with open(outfile,'w') as of: 
+        for line in mast_table: 
+            ticker = line.split(' ')[0].strip()
+            of.write(ticker + '\n') 
+    return
+
+def main(argv):
+    job, error_msg = parse_job(argv)    # get the job request
+    if error_msg:
+        print "\n[Error] " + error_msg  # check any error
+    else:
+        print ""
+        _extract_trades(job)        # work on extracting trades
+        print "\n"
+        _get_dividend_split_ratio(job)
+        print "\n"
+        _adjust_trades(job)
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
+
